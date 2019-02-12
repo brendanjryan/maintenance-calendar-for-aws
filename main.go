@@ -10,140 +10,141 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/rds"
 	"github.com/aws/aws-sdk-go/service/elasticache"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/rmkbow/ical-go"
 	"net/url"
 	"os"
 	"strings"
 	"flag"
+	"log"
 )
 
-var aws_session *session.Session
-var health_connection *health.Health
-var ec2_connection map[string]*ec2.EC2
-var rds_connection map[string]*rds.RDS
-var elasticache_connection map[string]*elasticache.ElastiCache
+var awsSession *session.Session
+var healthConnection *health.Health
+var ec2Connection map[string]*ec2.EC2
+var rdsConnection map[string]*rds.RDS
+var elasticacheConnection map[string]*elasticache.ElastiCache
 
-func error_check(e error) {
+func errorCheck(e error) {
 	if e != nil {
 		panic(e)
 	}
 }
 
 func main() {
-	local := flag.Bool("local", false, "Do not Upload file to S3")
-	bucket_region := flag.String("bucket-region", "", "Region of the S3 bucket")
-	bucket := flag.String("bucket", "", "Name of the S3 bucket")
-	prefix := flag.String("prefix", "/", "Prefix of the S3 path (optional)")
 	filename := flag.String("filename", "", "Filename of the local and destination file")
-	flag.Parse()
-	exit_flag := 0
+  region := flag.String("region", "us-east-1", "Region commands should be run in")
 
-	if *local == false {
-		if *bucket_region == "" {
-			exit_flag = 2
-			fmt.Println("--bucket-region REGION")
-		}
-		if *bucket == "" {
-			exit_flag = 2
-			fmt.Println("--bucket BUCKETNAME")
-		}
-	}
+	flag.Parse()
+	exFlag := 0
+
 	if *filename == "" {
-		exit_flag = 2
+		exFlag = 2
 		fmt.Println("--filename FILENAME")
 	}
 
-	if exit_flag != 0 {
-		os.Exit(exit_flag)
-	}
+  if *region == "" {
+    exFlag = 2
+    fmt.Println("--filename REGION")
+  }
 
-	initialize()
-	calendar := calendar(calendar_events(health_events()))
+	if exFlag != 0 {
+		os.Exit(exFlag)
+	}
+	log.Println("initializing...")
+	initialize(*region)
+	log.Println("successfully initialized!")
+	calendar := calendar(calendar_events(healthEvents()))
+	log.Println("saving calendar to file...!")
 	save_calendar_to_file(*filename, calendar)
-	if *local == false {
-		upload_file(*bucket_region, *bucket, *prefix, *filename)
-	}
+	log.Println("successfully saved calendar to file!")
 }
 
-func initialize() {
-	aws_session, _ = session.NewSession()
-	ec2_connection = make(map[string]*ec2.EC2)
-	health_connection = health.New(aws_session, &aws.Config{Region: aws.String("us-east-1")})
-	rds_connection = make(map[string]*rds.RDS)
-	elasticache_connection = make(map[string]*elasticache.ElastiCache)
+func initialize(region string) {
+	awsSession, _ = session.NewSession()
+	ec2Connection = make(map[string]*ec2.EC2)
+	healthConnection = health.New(awsSession, &aws.Config{Region: aws.String(region)})
+	rdsConnection = make(map[string]*rds.RDS)
+	elasticacheConnection = make(map[string]*elasticache.ElastiCache)
 }
 
-func initialize_ec2_connection(region string) {
-	ec2_connection[region] = ec2.New(aws_session, &aws.Config{Region: aws.String(region)})
+func initializeEC2Connection(region string) {
+	ec2Connection[region] = ec2.New(awsSession, &aws.Config{Region: aws.String(region)})
 }
 
-func initialize_rds_connection(region string) {
-	rds_connection[region] = rds.New(aws_session, &aws.Config{Region: aws.String(region)})
+func initializeRDSConnection(region string) {
+	rdsConnection[region] = rds.New(awsSession, &aws.Config{Region: aws.String(region)})
 }
 
-func initialize_elasticache_connection(region string) {
-	elasticache_connection[region] = elasticache.New(aws_session, &aws.Config{Region: aws.String(region)})
+func initializeElasticacheConnection(region string) {
+	elasticacheConnection[region] = elasticache.New(awsSession, &aws.Config{Region: aws.String(region)})
 }
 
-func health_events() []*health.Event {
-	describe_event_filter := &health.EventFilter{
+func healthEvents() []*health.Event {
+	log.Println("getting health events...")
+	describeEventFilter := &health.EventFilter{
 		EventTypeCategories: []*string{aws.String("scheduledChange")},
 		EventStatusCodes: []*string{aws.String("open"), aws.String("upcoming")},
 	}
-	describe_event_params := &health.DescribeEventsInput{
-		Filter: describe_event_filter,
+	describeEventParams := &health.DescribeEventsInput{
+		Filter: describeEventFilter,
 	}
-	describe_event_params.SetMaxResults(100)
-	health_events,_ := health_connection.DescribeEvents(describe_event_params)
-	return health_events.Events
+	describeEventParams.SetMaxResults(100)
+	healthEvents, err := healthConnection.DescribeEvents(describeEventParams)
+	if err != nil {
+		log.Fatal("error getting health events: ", err)
+	}
+
+	return healthEvents.Events
 }
 
 func resource_ids(health_arn *string) []string {
-	describe_affected_entities_params := &health.DescribeAffectedEntitiesInput{
+	describeAffectedEntitiesParams := &health.DescribeAffectedEntitiesInput{
 		Filter: &health.EntityFilter{
 			EventArns: []*string{health_arn},
 		},
 	}
-	describe_affected_entities_params.SetMaxResults(100)
-	var resource_ids []string
-	affected_entities, _ := health_connection.DescribeAffectedEntities(describe_affected_entities_params)
-	for _, entity := range affected_entities.Entities {
-		resource_ids = append(resource_ids,*entity.EntityValue)
+	describeAffectedEntitiesParams.SetMaxResults(100)
+	var resourceIds []string
+	affectedEntities, _ := healthConnection.DescribeAffectedEntities(describeAffectedEntitiesParams)
+	for _, entity := range affectedEntities.Entities {
+		resourceIds = append(resourceIds,*entity.EntityValue)
 	}
-	return resource_ids
+	return resourceIds
 }
 
 func process_event(health_arn *string) ([]string, string, string, string, *time.Time, *time.Time) {
 
-	resource_ids := resource_ids(health_arn)
+	resourceIds := resource_ids(health_arn)
 
-	describe_event_params := &health.DescribeEventDetailsInput{
+	describeEventParams := &health.DescribeEventDetailsInput{
 		EventArns: []*string{health_arn},
 	}
-	detailed_events, _ := health_connection.DescribeEventDetails(describe_event_params)
-	var description string
-	var event_type string
-	var event_service string
-	var event_start_time *time.Time
-	var event_end_time *time.Time
-	for _, set := range detailed_events.SuccessfulSet {
-		description = *set.EventDescription.LatestDescription
-		event_type = *set.Event.EventTypeCode
-		event_service = *set.Event.Service
-		event_start_time = set.Event.StartTime
-		event_end_time = set.Event.EndTime
+	detailedEvents, err := healthConnection.DescribeEventDetails(describeEventParams)
+	if err != nil {
+		log.Fatal("error describing event details: ", err)
 	}
-	return resource_ids, description, event_type, event_service, event_start_time, event_end_time
+	var description string
+	var et string
+	var es string
+	var est *time.Time
+	var eet *time.Time
+	for _, set := range detailedEvents.SuccessfulSet {
+		description = *set.EventDescription.LatestDescription
+		et = *set.Event.EventTypeCode
+		es = *set.Event.Service
+		est = set.Event.StartTime
+		eet = set.Event.EndTime
+	}
+	return resourceIds, description, et, es, est, eet
 }
 
-func ec2_instance_name(instance_id string, region string) string {
+func ec2InstanceName(id string, region string) string {
 	params := &ec2.DescribeInstancesInput{
 		Filters: []*ec2.Filter{
 			{
 				Name: aws.String("instance-id"),
 				Values: []*string{
-					aws.String(instance_id),
+					aws.String(id),
 				},
 			},
 		},
@@ -151,38 +152,41 @@ func ec2_instance_name(instance_id string, region string) string {
 
 	var ec2din_response *ec2.DescribeInstancesOutput
 	var err error
-	if ec2_connection[region] == nil {
-		initialize_ec2_connection(region)
+	if ec2Connection[region] == nil {
+		initializeEC2Connection(region)
 	}
-	ec2din_response, err = ec2_connection[region].DescribeInstances(params)
-	error_check(err)
+	ec2din_response, err = ec2Connection[region].DescribeInstances(params)
+	errorCheck(err)
 
-	var instance_name string
+	var name string
 	for _, reservations := range ec2din_response.Reservations {
 		for _, instance := range reservations.Instances {
 			for _, tag := range instance.Tags {
 				if *tag.Key == "Name" {
-					instance_name = url.QueryEscape(*tag.Value)
+					name = url.QueryEscape(*tag.Value)
 				}
 			}
 		}
 	}
-	return instance_name
+	return name
 }
 
 
 func rds_maintenance_window(name string, region string) string {
 	var rds_maintenance_window string
 
-	if rds_connection[region] == nil {
-		initialize_rds_connection(region)
+	if rdsConnection[region] == nil {
+		initializeRDSConnection(region)
 	}
 
 	describe_rds_cluster_filter := &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: aws.String(name),
 	}
 
-	db_clusters,_ := rds_connection[region].DescribeDBClusters(describe_rds_cluster_filter)
+	db_clusters, err := rdsConnection[region].DescribeDBClusters(describe_rds_cluster_filter)
+	if err != nil {
+		log.Fatal("error describing database clusters: ", err)
+	}
 	for _,db_cluster := range db_clusters.DBClusters {
 		rds_maintenance_window = *db_cluster.PreferredMaintenanceWindow
 	}
@@ -194,7 +198,10 @@ func rds_maintenance_window(name string, region string) string {
 	describe_rds_instance_filter := &rds.DescribeDBInstancesInput{
 		DBInstanceIdentifier: aws.String(name),
 	}
-	db_instances,_ := rds_connection[region].DescribeDBInstances(describe_rds_instance_filter)
+	db_instances, err := rdsConnection[region].DescribeDBInstances(describe_rds_instance_filter)
+	if err != nil {
+		log.Fatal("error describing database instance: ", err)
+	}
 	for _,db_instance := range db_instances.DBInstances {
 		rds_maintenance_window = *db_instance.PreferredMaintenanceWindow
 	}
@@ -205,8 +212,8 @@ func rds_maintenance_window(name string, region string) string {
 func elasticache_maintenance_window(name string, region string) string {
 	var elasticache_maintenance_window string
 
-	if elasticache_connection[region] == nil {
-		initialize_elasticache_connection(region)
+	if elasticacheConnection[region] == nil {
+		initializeElasticacheConnection(region)
 	}
 
         elasticache_name_normalized := strings.Replace(name, "/", "_", -1)
@@ -224,7 +231,7 @@ func elasticache_maintenance_window(name string, region string) string {
 		ReplicationGroupId: aws.String(elasticache_name),
 	}
 
-	replica_sets,_ := elasticache_connection[region].DescribeReplicationGroups(describe_elasticache_replica_filter)
+	replica_sets,_ := elasticacheConnection[region].DescribeReplicationGroups(describe_elasticache_replica_filter)
 
 	var elasticache_cluster_name string
 
@@ -236,7 +243,7 @@ func elasticache_maintenance_window(name string, region string) string {
 		CacheClusterId: aws.String(elasticache_cluster_name),
 	}
 
-	clusters,_ := elasticache_connection[region].DescribeCacheClusters(describe_elasticache_cluster_filter)
+	clusters,_ := elasticacheConnection[region].DescribeCacheClusters(describe_elasticache_cluster_filter)
 
 
 	for _,cluster := range clusters.CacheClusters {
@@ -303,7 +310,7 @@ func calendar_events(health_events []*health.Event) []ical.CalendarEvent {
 			var calendar_event_summary string
 			switch event_service {
 			case "EC2":
-				calendar_event_summary = event_type + " " + ec2_instance_name(event_affected_resource, *health_event.Region) + " " + event_affected_resource
+				calendar_event_summary = event_type + " " + ec2InstanceName(event_affected_resource, *health_event.Region) + " " + event_affected_resource
 			case "RDS":
 				calendar_event_summary = event_service + " " + event_affected_resource + " " + event_type
 				calendar_event_start_time_rds, calendar_event_end_time_rds := maintenance_time(calendar_event_start_time, rds_maintenance_window(event_affected_resource, *health_event.Region))
@@ -391,39 +398,3 @@ func weekday_from_shortname(shortname string) time.Weekday {
 	return weekday
 }
 
-
-func upload_file(bucket_region string, bucket string, prefix string, filename string) {
-	if !strings.HasPrefix(prefix, "/") {
-		prefix = "/" + prefix
-	}
-	if !strings.HasSuffix(prefix, "/") {
-		prefix = prefix + "/"
-	}
-
-	file, open_err := os.Open(filename)
-	if open_err != nil {
-		error_check(open_err)
-	}
-	defer file.Close()
-	sess, _ := session.NewSession(&aws.Config{Region: aws.String(bucket_region)})
-	uploader := s3manager.NewUploader(sess)
-
-	_, upload_err := uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String(bucket),
-		Key: aws.String(prefix + filename),
-		Body: file,
-		ACL: aws.String("public-read"),
-	})
-	if upload_err != nil {
-		error_check(upload_err)
-	}
-
-	cal_url := ""
-	if bucket_region == "us-east-1" {
-		cal_url = "https://s3.amazonaws.com/" + bucket + prefix + filename;
-	} else {
-		cal_url = "https://s3-" + bucket_region + ".amazonaws.com/" + bucket + prefix + filename;
-	}
-
-	fmt.Printf("Successfully uploaded to %q\n", cal_url)
-}
