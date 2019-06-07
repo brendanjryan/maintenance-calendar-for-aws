@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/rds"
 	"github.com/aws/aws-sdk-go/service/elasticache"
 	"github.com/rmkbow/ical-go"
-	"net/url"
 	"os"
 	"strings"
 	"flag"
@@ -24,11 +23,6 @@ var ec2Connection map[string]*ec2.EC2
 var rdsConnection map[string]*rds.RDS
 var elasticacheConnection map[string]*elasticache.ElastiCache
 
-func errorCheck(e error) {
-	if e != nil {
-		panic(e)
-	}
-}
 
 func main() {
 	filename := flag.String("filename", "", "Filename of the local and destination file")
@@ -53,11 +47,73 @@ func main() {
 	log.Println("initializing...")
 	initialize(*region)
 	log.Println("successfully initialized!")
-	calendar := calendar(calendar_events(healthEvents()))
-	log.Println("saving calendar to file...!")
-	save_calendar_to_file(*filename, calendar)
-	log.Println("successfully saved calendar to file!")
+	//_ = calendar(calendar_events(healthEvents()))
+
+	initializeElasticacheConnection(*region)
+	e := elasticacheConnection[*region]
+	log.Println(e)
+	res, err := e.DescribeCacheClusters(&elasticache.DescribeCacheClustersInput{
+		ShowCacheNodeInfo:                       aws.Bool(true),
+	})
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+
+	log.Printf("res: %+v", res)
+
+
+	// all events will be given in the context of the current week
+	evts := []ical.CalendarEvent{}
+	now := time.Now().UTC()
+
+	sow := now.AddDate(0, 0, -int(now.Weekday()))
+	for i, cc := range res.CacheClusters {
+
+		pts := strings.Split(*cc.PreferredMaintenanceWindow, "-")
+		log.Println("higher parts: ", pts)
+
+		st := parseAWSTime(pts[0])
+		et := parseAWSTime(pts[1])
+
+		sa := time.Date(now.Year(), now.Month(), sow.Day() + int(st.day), int(st.hour), int(st.min), 0, 0, time.UTC)
+		ea := time.Date(now.Year(), now.Month(), sow.Day() + int(et.day), int(et.hour), int(et.min), 0, 0, time.UTC)
+
+		evts = append(evts, ical.CalendarEvent{
+			Id:            string(i),
+			Summary:       fmt.Sprintf("%s Maintainence window", *cc.CacheClusterId),
+			Description:       fmt.Sprintf("%s Maintainence window", *cc.CacheClusterId),
+			URL:           "",
+			CreatedAtUTC: &now,
+			ModifiedAtUTC: &now,
+			StartAt: &sa,
+			EndAt: &ea,
+		})
+	}
+
+	save_calendar_to_file(*filename, calendar(evts))
 }
+
+type awsTime struct {
+	day time.Weekday
+	hour int64
+	min int64
+}
+
+func parseAWSTime(in string) awsTime {
+	pts := strings.Split(in, ":")
+
+	h, _ := strconv.ParseInt(pts[1], 10, 32)
+	m, _ := strconv.ParseInt(pts[2], 10, 32)
+
+	return awsTime{
+		day:  weekday_from_shortname(pts[0]),
+		hour: h,
+		min:  m,
+	}
+}
+
 
 func initialize(region string) {
 	awsSession, _ = session.NewSession()
@@ -136,39 +192,6 @@ func process_event(health_arn *string) ([]string, string, string, string, *time.
 		eet = set.Event.EndTime
 	}
 	return resourceIds, description, et, es, est, eet
-}
-
-func ec2InstanceName(id string, region string) string {
-	params := &ec2.DescribeInstancesInput{
-		Filters: []*ec2.Filter{
-			{
-				Name: aws.String("instance-id"),
-				Values: []*string{
-					aws.String(id),
-				},
-			},
-		},
-	}
-
-	var ec2din_response *ec2.DescribeInstancesOutput
-	var err error
-	if ec2Connection[region] == nil {
-		initializeEC2Connection(region)
-	}
-	ec2din_response, err = ec2Connection[region].DescribeInstances(params)
-	errorCheck(err)
-
-	var name string
-	for _, reservations := range ec2din_response.Reservations {
-		for _, instance := range reservations.Instances {
-			for _, tag := range instance.Tags {
-				if *tag.Key == "Name" {
-					name = url.QueryEscape(*tag.Value)
-				}
-			}
-		}
-	}
-	return name
 }
 
 
@@ -309,8 +332,6 @@ func calendar_events(health_events []*health.Event) []ical.CalendarEvent {
 		for _, event_affected_resource := range event_affected_resources {
 			var calendar_event_summary string
 			switch event_service {
-			case "EC2":
-				calendar_event_summary = event_type + " " + ec2InstanceName(event_affected_resource, *health_event.Region) + " " + event_affected_resource
 			case "RDS":
 				calendar_event_summary = event_service + " " + event_affected_resource + " " + event_type
 				calendar_event_start_time_rds, calendar_event_end_time_rds := maintenance_time(calendar_event_start_time, rds_maintenance_window(event_affected_resource, *health_event.Region))
@@ -376,6 +397,8 @@ func next_maintenance_window(base_time *time.Time, maintenance_window_start []st
 	next_maintenance_window_end = time.Date(next_maintenance_window_end.Year(), next_maintenance_window_end.Month(), next_maintenance_window_end.Day(), maintenance_window_end_hour, maintenance_window_end_minute, 0, 0, next_date.Location())
 	return next_maintenance_window_start, next_maintenance_window_end
 }
+
+
 
 func weekday_from_shortname(shortname string) time.Weekday {
 	var weekday time.Weekday
